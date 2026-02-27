@@ -1,7 +1,5 @@
 import streamlit as st
 import asyncio
-import requests
-import urllib.parse
 from datetime import datetime
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
@@ -68,18 +66,21 @@ async def get_spotify_streams_playwright(artist_id):
             
     return tracks
 
-def get_release_date_from_itunes(artist_name, track_name):
+def get_release_date_from_spotify(sp, artist_name, track_name):
+    """Uses the official Spotify API to find the exact release date."""
+    # Clean up the track name to ensure a better search match
     clean_track_name = track_name.split('(')[0].split('-')[0].strip()
     query = f"{artist_name} {clean_track_name}"
-    url = f"https://itunes.apple.com/search?term={urllib.parse.quote(query)}&entity=song&limit=1"
+    
     try:
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        if data.get('resultCount', 0) > 0:
-            release_date_raw = data['results'][0].get('releaseDate', '')
-            if release_date_raw:
-                dt = datetime.strptime(release_date_raw, "%Y-%m-%dT%H:%M:%SZ")
-                return dt.strftime("%Y-%m-%d")
+        # Search Spotify for the specific track
+        result = sp.search(q=query, type='track', limit=1)
+        tracks = result.get('tracks', {}).get('items', [])
+        
+        if tracks:
+            # Extract the release date from the album the track belongs to
+            release_date = tracks[0]['album']['release_date']
+            return release_date
         return "Unknown"
     except Exception:
         return "Unknown"
@@ -111,7 +112,10 @@ async def perform_search(artist_input):
     final_results = []
     for idx, track_info in enumerate(top_tracks_data, start=1):
         track_name = track_info['name']
-        rel_date = get_release_date_from_itunes(artist_name, track_name)
+        
+        # Now we pass our authenticated Spotify connection (sp) to get the date natively
+        rel_date = get_release_date_from_spotify(sp, artist_name, track_name)
+        
         final_results.append({
             "Rank": idx,
             "Track Name": track_name,
