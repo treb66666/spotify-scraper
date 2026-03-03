@@ -15,6 +15,7 @@ os.system("playwright install-deps chromium")
 async def get_spotify_streams_playwright(artist_id):
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
+    cities_data = []
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -26,6 +27,7 @@ async def get_spotify_streams_playwright(artist_id):
             await page.wait_for_selector('[data-testid="tracklist-row"]', timeout=10000)
             await page.wait_for_timeout(2000)
             
+            # 1. SCRAPE THE TRACKS
             try:
                 button = page.locator('button:has-text("See more")')
                 if await button.count() > 0:
@@ -40,11 +42,9 @@ async def get_spotify_streams_playwright(artist_id):
                 pass 
             
             rows = await page.query_selector_all('[data-testid="tracklist-row"]')
-            
             for row in rows[:10]:
                 text = await row.inner_text()
                 parts = [p.strip() for p in text.split('\n') if p.strip()]
-                
                 if len(parts) >= 2:
                     streams_str = "Unknown"
                     track_name = "Unknown"
@@ -57,30 +57,72 @@ async def get_spotify_streams_playwright(artist_id):
                         if any(c.isalpha() for c in p) and p != 'E':
                             track_name = p
                             break
-                            
                     tracks.append({'name': track_name, 'streams': streams_str})
+                    
+            # 2. SCRAPE "WHERE PEOPLE LISTEN" (Top Locations)
+            try:
+                # Scroll down the page to trigger the lazy-loading of the bottom sections
+                await page.evaluate("window.scrollBy(0, 1000)")
+                await page.wait_for_timeout(1000)
+                await page.evaluate("window.scrollBy(0, 1500)")
+                await page.wait_for_timeout(1500)
+                
+                # Attempt to click an "About" tab just in case it is hidden there
+                about_tab = page.locator('button:has-text("About"), a:has-text("About")')
+                if await about_tab.count() > 0:
+                    for i in range(await about_tab.count()):
+                        try:
+                            await about_tab.nth(i).click(timeout=1000)
+                            await page.wait_for_timeout(1500)
+                        except:
+                            pass
+
+                # Extract the raw text from the page to find the cities
+                body_text = await page.inner_text('body')
+                if "Where people listen" in body_text:
+                    section_text = body_text.split("Where people listen")[1]
+                    # Read the next ~40 lines to capture the 5 cities
+                    lines = [line.strip() for line in section_text.split('\n') if line.strip()][:40]
+                    
+                    for i, line in enumerate(lines):
+                        if "listeners" in line.lower():
+                            # Handle different formatting scenarios
+                            if line.lower() == "listeners" and i > 0:
+                                listeners_count = lines[i-1] + " listeners"
+                                city_line = lines[i-2] if i >= 2 else ""
+                                if city_line.isdigit() and i >= 3:
+                                    city_line = lines[i-3]
+                            else:
+                                listeners_count = line
+                                city_line = lines[i-1] if i >= 1 else ""
+                                if city_line.isdigit() and i >= 2:
+                                    city_line = lines[i-2]
+                            
+                            # Clean up and add to list
+                            if city_line and city_line.lower() != "where people listen":
+                                if not any(c["City"] == city_line for c in cities_data):
+                                    clean_listeners = listeners_count.lower().replace("listeners", "").strip()
+                                    cities_data.append({"City": city_line, "Listeners": clean_listeners})
+                                if len(cities_data) == 5:
+                                    break
+            except Exception:
+                pass # If the artist is too small to have this section, we gracefully skip it
+
         except Exception:
             pass 
         finally:
             await browser.close()
             
-    return tracks
+    return tracks, cities_data
 
 def get_release_date_from_spotify(sp, artist_name, track_name):
-    """Uses the official Spotify API to find the exact release date."""
-    # Clean up the track name to ensure a better search match
     clean_track_name = track_name.split('(')[0].split('-')[0].strip()
     query = f"{artist_name} {clean_track_name}"
-    
     try:
-        # Search Spotify for the specific track
         result = sp.search(q=query, type='track', limit=1)
         tracks = result.get('tracks', {}).get('items', [])
-        
         if tracks:
-            # Extract the release date from the album the track belongs to
-            release_date = tracks[0]['album']['release_date']
-            return release_date
+            return tracks[0]['album']['release_date']
         return "Unknown"
     except Exception:
         return "Unknown"
@@ -100,22 +142,20 @@ async def perform_search(artist_input):
         result = sp.search(q='artist:' + artist_input, type='artist', limit=1)
         items = result['artists']['items']
         if not items:
-            return None, f"Artist '{artist_input}' not found."
+            return None, None, f"Artist '{artist_input}' not found."
         artist_data = items[0]
         artist_name = artist_data['name']
         artist_id = artist_data['id']
 
-    top_tracks_data = await get_spotify_streams_playwright(artist_id)
+    # Unpack the new cities data
+    top_tracks_data, cities_data = await get_spotify_streams_playwright(artist_id)
     if not top_tracks_data:
-        return None, "Failed to pull track data from the Spotify web page."
+        return None, None, "Failed to pull track data from the Spotify web page."
 
     final_results = []
     for idx, track_info in enumerate(top_tracks_data, start=1):
         track_name = track_info['name']
-        
-        # Now we pass our authenticated Spotify connection (sp) to get the date natively
         rel_date = get_release_date_from_spotify(sp, artist_name, track_name)
-        
         final_results.append({
             "Rank": idx,
             "Track Name": track_name,
@@ -123,30 +163,40 @@ async def perform_search(artist_input):
             "Total Streams": track_info['streams']
         })
 
-    return final_results, None
+    return final_results, cities_data, None
 
 # --- STREAMLIT WEB UI ---
-st.set_page_config(page_title="Spotify Stream Scraper", layout="centered")
+st.set_page_config(page_title="Spotify Stream Scraper", layout="wide") # Changed to wide to fit 5 cities nicely
 
 st.title("🎧 Spotify Stream Scraper")
-st.write("Enter an artist's name or paste their Spotify link below to fetch their top tracks.")
+st.write("Enter an artist's name or paste their Spotify link below to fetch their top tracks and locations.")
 
 artist_input = st.text_input("Artist Name or Link:")
 
-if st.button("Fetch Tracks", type="primary"):
+if st.button("Fetch Artist Data", type="primary"):
     if not artist_input:
         st.warning("Please provide an Artist Name or Spotify Link.")
     else:
-        with st.spinner(f"Fetching data for {artist_input}... this takes about 10 seconds."):
+        with st.spinner(f"Fetching data for {artist_input}... this takes about 10-15 seconds."):
             try:
-                # Run the async scraping function
-                results, error_msg = asyncio.run(perform_search(artist_input))
+                # Capture the three returned variables
+                results, cities, error_msg = asyncio.run(perform_search(artist_input))
                 
                 if error_msg:
                     st.error(error_msg)
                 elif results:
-                    st.success("Successfully fetched tracks!")
-                    # Convert results to a Pandas DataFrame to render a clean web table
+                    st.success("Successfully fetched data!")
+                    
+                    # If the scraper found the cities, display them in 5 neat columns!
+                    if cities:
+                        st.subheader("🌍 Where People Listen (Top 5)")
+                        cols = st.columns(len(cities))
+                        for i, city_info in enumerate(cities):
+                            # Streamlit's .metric() makes big, bold numbers that look great on dashboards
+                            cols[i].metric(label=city_info["City"], value=city_info["Listeners"])
+                        st.divider() # Adds a clean horizontal line
+                        
+                    st.subheader("🎵 Top 10 Popular Tracks")
                     df = pd.DataFrame(results)
                     st.dataframe(df, use_container_width=True, hide_index=True)
             except Exception as e:
