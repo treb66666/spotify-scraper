@@ -1,154 +1,153 @@
 import streamlit as st
 import asyncio
+from datetime import datetime
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
+from playwright.async_api import async_playwright
 import pandas as pd
 import os
-import json
-import subprocess
-import sys
 
-# Install Playwright browsers at runtime (required on Streamlit Cloud)
-@st.cache_resource
-def install_playwright():
-    result = subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "chromium"],
-        capture_output=True, text=True
-    )
-    return result.returncode == 0
+# Tell the cloud server to install the hidden browser
+os.system("playwright install chromium")
+os.system("playwright install-deps chromium")
 
+# --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
-    from playwright.async_api import async_playwright
-
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
-    cities_data = []
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
-        context = await browser.new_context(
-            viewport={'width': 1280, 'height': 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
-
-        if os.path.exists("cookies.json"):
-            with open("cookies.json", "r") as f:
-                cookies = json.load(f)
-                await context.add_cookies(cookies)
-            
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
         page = await context.new_page()
         
         try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_selector('[data-testid="tracklist-row"]', timeout=10000)
             await page.wait_for_timeout(2000)
-
-            # --- TRACK SCRAPING ---
+            
+            try:
+                button = page.locator('button:has-text("See more")')
+                if await button.count() > 0:
+                    await button.first.click()
+                    await page.wait_for_timeout(1000)
+                else:
+                    button2 = page.locator('button:has-text("Show more")')
+                    if await button2.count() > 0:
+                        await button2.first.click()
+                        await page.wait_for_timeout(1000)
+            except Exception:
+                pass 
+            
             rows = await page.query_selector_all('[data-testid="tracklist-row"]')
+            
             for row in rows[:10]:
                 text = await row.inner_text()
                 parts = [p.strip() for p in text.split('\n') if p.strip()]
+                
                 if len(parts) >= 2:
-                    name = parts[0]
-                    streams = "Unknown"
-                    for p in parts:
-                        if p.replace(',', '').isdigit() and len(p) > 3:
-                            streams = p
+                    streams_str = "Unknown"
+                    track_name = "Unknown"
+                    for p in reversed(parts):
+                        if ':' in p and len(p) <= 5: continue
+                        if sum(c.isdigit() for c in p) >= 1 and not any(c.isalpha() for c in p):
+                            streams_str = p
                             break
-                    tracks.append({'name': name, 'streams': streams})
-
-            # --- LOCATION SCRAPING ---
-            for _ in range(5):
-                await page.mouse.wheel(0, 1000)
-                await page.wait_for_timeout(600)
-
-            about_card = page.locator('section[data-testid="about"]')
-            if await about_card.count() > 0:
-                await about_card.click(force=True)
-                await page.wait_for_timeout(3000)
-
-                body_text = await page.inner_text('body')
-                if "Where people listen" in body_text:
-                    lines = [l.strip() for l in body_text.split("Where people listen")[1].split('\n') if l.strip()]
-                    for i, line in enumerate(lines):
-                        if "listeners" in line.lower() and i > 0:
-                            city = lines[i-1]
-                            if not city.isdigit():
-                                count = line.replace("listeners", "").strip()
-                                if len(cities_data) < 5:
-                                    cities_data.append({"City": city, "Listeners": count})
-
-            if not cities_data:
-                await page.screenshot(path="debug_screenshot.png")
-
-        except Exception as e:
-            st.error(f"Scraper encountered an issue: {e}")
+                    for p in parts:
+                        if any(c.isalpha() for c in p) and p != 'E':
+                            track_name = p
+                            break
+                            
+                    tracks.append({'name': track_name, 'streams': streams_str})
+        except Exception:
+            pass 
         finally:
             await browser.close()
             
-    return tracks, cities_data
+    return tracks
 
-def get_release_date(sp, artist_name, track_name):
+def get_release_date_from_spotify(sp, artist_name, track_name):
+    """Uses the official Spotify API to find the exact release date."""
+    # Clean up the track name to ensure a better search match
+    clean_track_name = track_name.split('(')[0].split('-')[0].strip()
+    query = f"{artist_name} {clean_track_name}"
+    
     try:
-        res = sp.search(q=f"artist:{artist_name} track:{track_name}", type='track', limit=1)
-        if res['tracks']['items']:
-            return res['tracks']['items'][0]['album']['release_date']
-    except:
-        pass
-    return "Unknown"
+        # Search Spotify for the specific track
+        result = sp.search(q=query, type='track', limit=1)
+        tracks = result.get('tracks', {}).get('items', [])
+        
+        if tracks:
+            # Extract the release date from the album the track belongs to
+            release_date = tracks[0]['album']['release_date']
+            return release_date
+        return "Unknown"
+    except Exception:
+        return "Unknown"
 
 async def perform_search(artist_input):
-    sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-        client_id="1d7660677d5b4567b86bfa2d730eacd7",
-        client_secret="37a4d9cd968e43ad851074944d2df8e7"
-    ))
+    CLIENT_ID = "1d7660677d5b4567b86bfa2d730eacd7"
+    CLIENT_SECRET = "37a4d9cd968e43ad851074944d2df8e7"
+    
+    auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
+    sp = spotipy.Spotify(auth_manager=auth_manager)
 
-    try:
-        if "artist/" in artist_input:
-            artist_id = artist_input.split("artist/")[1].split("?")[0]
-        else:
-            search = sp.search(q=artist_input, type='artist', limit=1)
-            artist_id = search['artists']['items'][0]['id']
+    if "spotify.com/artist/" in artist_input:
+        artist_id = artist_input.split("artist/")[1].split("?")[0]
+        artist_data = sp.artist(artist_id)
+        artist_name = artist_data['name']
+    else:
+        result = sp.search(q='artist:' + artist_input, type='artist', limit=1)
+        items = result['artists']['items']
+        if not items:
+            return None, f"Artist '{artist_input}' not found."
+        artist_data = items[0]
+        artist_name = artist_data['name']
+        artist_id = artist_data['id']
+
+    top_tracks_data = await get_spotify_streams_playwright(artist_id)
+    if not top_tracks_data:
+        return None, "Failed to pull track data from the Spotify web page."
+
+    final_results = []
+    for idx, track_info in enumerate(top_tracks_data, start=1):
+        track_name = track_info['name']
         
-        artist_name = sp.artist(artist_id)['name']
-        tracks_raw, cities = await get_spotify_streams_playwright(artist_id)
+        # Now we pass our authenticated Spotify connection (sp) to get the date natively
+        rel_date = get_release_date_from_spotify(sp, artist_name, track_name)
         
-        final_results = []
-        for t in tracks_raw:
-            date = get_release_date(sp, artist_name, t['name'])
-            final_results.append({"Track Name": t['name'], "Release Date": date, "Total Streams": t['streams']})
-            
-        return final_results, cities, None
-    except Exception as e:
-        return None, None, str(e)
+        final_results.append({
+            "Rank": idx,
+            "Track Name": track_name,
+            "Release Date": rel_date,
+            "Total Streams": track_info['streams']
+        })
 
-# --- UI ---
-st.set_page_config(page_title="Spotify Pro Scraper")
-st.title("🎧 Spotify Artist Insights")
+    return final_results, None
 
-# Install Playwright Chromium on startup (cached so it only runs once)
-with st.spinner("Initializing browser engine..."):
-    installed = install_playwright()
-    if not installed:
-        st.warning("Browser installation may have had issues. Proceeding anyway...")
+# --- STREAMLIT WEB UI ---
+st.set_page_config(page_title="Spotify Stream Scraper", layout="centered")
 
-query = st.text_input("Enter Artist Name or URL")
+st.title("🎧 Spotify Stream Scraper")
+st.write("Enter an artist's name or paste their Spotify link below to fetch their top tracks.")
 
-if st.button("Get Data"):
-    with st.spinner("Accessing Spotify..."):
-        results, cities, err = asyncio.run(perform_search(query))
-        if err:
-            st.error(f"Error: {err}")
-        else:
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                st.subheader("Top Tracks")
-                st.dataframe(pd.DataFrame(results))
-            with c2:
-                st.subheader("Top Cities")
-                for c in cities:
-                    st.write(f"**{c['City']}**: {c['Listeners']}")
-                if not cities and os.path.exists("debug_screenshot.png"):
-                    st.image("debug_screenshot.png")
+artist_input = st.text_input("Artist Name or Link:")
+
+if st.button("Fetch Tracks", type="primary"):
+    if not artist_input:
+        st.warning("Please provide an Artist Name or Spotify Link.")
+    else:
+        with st.spinner(f"Fetching data for {artist_input}... this takes about 10 seconds."):
+            try:
+                # Run the async scraping function
+                results, error_msg = asyncio.run(perform_search(artist_input))
+                
+                if error_msg:
+                    st.error(error_msg)
+                elif results:
+                    st.success("Successfully fetched tracks!")
+                    # Convert results to a Pandas DataFrame to render a clean web table
+                    df = pd.DataFrame(results)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.error(f"An unexpected error occurred: {e}")
