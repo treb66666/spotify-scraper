@@ -7,14 +7,11 @@ import pandas as pd
 import os
 import json
 
-# Installs the browser for the cloud server
 os.system("playwright install chromium")
 
 async def get_spotify_streams_playwright(artist_id):
-    # Guaranteed to be the actual, real Spotify URL
-    base_url = "https://open.spotify.com/artist/"
-    url = f"{base_url}{artist_id}"
-    
+    # THE ACTUAL SPOTIFY URL
+    url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
     
@@ -28,7 +25,7 @@ async def get_spotify_streams_playwright(artist_id):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        # Load your cookies if you uploaded them
+        # Load your valid cookies to bypass the login wall!
         try:
             if os.path.exists("cookies.json"):
                 with open("cookies.json", "r") as f:
@@ -41,28 +38,23 @@ async def get_spotify_streams_playwright(artist_id):
         page = await context.new_page()
         
         try:
-            # Go to the site and wait for the network to settle
-            await page.goto(url, wait_until="networkidle", timeout=20000)
+            await page.goto(url, wait_until="networkidle", timeout=25000)
             
-            # --- DIAGNOSTIC SCREENSHOT ---
-            # We take a screenshot immediately to see what the bot is looking at
-            await page.screenshot(path="debug_screenshot.png")
-            
-            # Destroy popups blocking the screen
-            await page.evaluate("""
-                document.querySelectorAll('[data-testid="login-button"], [id^="onetrust"], .GenericModal, [role="dialog"]').forEach(el => el.remove());
-            """)
-            await page.wait_for_timeout(1000)
+            # Destroy cookie banners that might block clicks
+            try:
+                await page.evaluate("""
+                    const elements = document.querySelectorAll('[id^="onetrust"], button:has-text("Accept")');
+                    elements.forEach(el => el.remove());
+                """)
+            except:
+                pass
             
             # --- 1. SCRAPE TRACKS ---
             try:
-                # Expand the tracks list
-                await page.evaluate("""
-                    const btns = Array.from(document.querySelectorAll('button'));
-                    const moreBtn = btns.find(b => b.innerText.includes('See more') || b.innerText.includes('Show more'));
-                    if(moreBtn) moreBtn.click();
-                """)
-                await page.wait_for_timeout(1500)
+                more_btn = page.locator('button:has-text("See more"), button:has-text("Show more")')
+                if await more_btn.count() > 0:
+                    await more_btn.first.click(force=True)
+                    await page.wait_for_timeout(1500)
                 
                 rows = await page.query_selector_all('[data-testid="tracklist-row"]')
                 for row in rows[:10]:
@@ -86,25 +78,25 @@ async def get_spotify_streams_playwright(artist_id):
                 
             # --- 2. SCRAPE LOCATIONS ---
             try:
-                # Aggressively scroll down
-                for _ in range(6):
-                    await page.mouse.wheel(0, 1000)
+                # Scroll aggressively down (10 times) to guarantee the bottom half loads
+                for _ in range(10):
+                    await page.evaluate("window.scrollBy(0, 1000);")
                     await page.wait_for_timeout(800)
 
-                # Try to click the "About" section
-                await page.evaluate("""
-                    const aboutSection = document.querySelector('section[data-testid="about"]');
-                    if (aboutSection) { aboutSection.click(); }
-                    else {
-                        const headers = Array.from(document.querySelectorAll('h2, h3, div'));
-                        const aboutHeader = headers.find(el => el.innerText === 'About');
-                        if (aboutHeader) aboutHeader.click();
-                    }
-                """)
-                await page.wait_for_timeout(2500) 
+                # Look for the About card/section and click it
+                about_section = page.locator('section[data-testid="about"], h2:text-is("About")')
+                if await about_section.count() > 0:
+                    await about_section.first.scroll_into_view_if_needed()
+                    await page.wait_for_timeout(1000)
+                    await about_section.first.click(force=True)
+                    await page.wait_for_timeout(3000) # Wait for popup to open
 
-                # Grab all text on the screen
-                body_text = await page.inner_text('body')
+                # Read text from the modal popup
+                dialog = page.locator('[role="dialog"]')
+                if await dialog.count() > 0:
+                    body_text = await dialog.first.inner_text()
+                else:
+                    body_text = await page.inner_text('body')
 
                 # Parse the cities
                 if "Where people listen" in body_text:
@@ -114,6 +106,11 @@ async def get_spotify_streams_playwright(artist_id):
                     for i, line in enumerate(lines):
                         if "listeners" in line.lower() and "monthly" not in line.lower():
                             city = lines[i-1]
+                            
+                            # Sometimes Spotify puts a rank number before the city name
+                            if city.isdigit() and i >= 2:
+                                city = lines[i-2]
+                                
                             listeners = line.lower().replace("listeners", "").strip()
                             
                             if city and not city.isdigit() and "Where people listen" not in city and "About" not in city:
@@ -122,11 +119,14 @@ async def get_spotify_streams_playwright(artist_id):
                                     
                         if len(cities_data) == 5:
                             break
+                            
             except Exception:
                 pass 
                 
-            # Update the screenshot one last time to capture the final state
-            await page.screenshot(path="debug_screenshot.png")
+            # Take the diagnostic screenshot at the VERY END, so if it fails, 
+            # we see exactly where it gave up (e.g. at the bottom of the page)
+            if not cities_data:
+                await page.screenshot(path="debug_screenshot.png")
 
         except Exception:
             pass 
@@ -154,9 +154,12 @@ async def perform_search(artist_input):
     auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     sp = spotipy.Spotify(auth_manager=auth_manager)
 
-    # Fixed to recognize real Spotify links properly
-    if "http" in artist_input or "spotify:artist:" in artist_input:
-        artist_id = artist_input.split("artist/")[1].split("?")[0] if "artist/" in artist_input else artist_input.split(":")[-1]
+    # Correct URL parsing for the official link format
+    if "open.spotify.com/artist/" in artist_input or "spotify:artist:" in artist_input:
+        if "artist/" in artist_input:
+            artist_id = artist_input.split("artist/")[1].split("?")[0]
+        else:
+            artist_id = artist_input.split(":")[-1]
         artist_data = sp.artist(artist_id)
         artist_name = artist_data['name']
     else:
@@ -173,7 +176,6 @@ async def perform_search(artist_input):
         os.remove("debug_screenshot.png")
 
     top_tracks_data, cities_data = await get_spotify_streams_playwright(artist_id)
-    
     if not top_tracks_data:
         return None, None, "Failed to pull track data from the Spotify web page."
 
@@ -202,14 +204,13 @@ if st.button("Fetch Artist Data", type="primary"):
     if not artist_input:
         st.warning("Please provide an Artist Name or Spotify Link.")
     else:
-        with st.spinner(f"Fetching data for {artist_input}... this takes about 10-15 seconds."):
+        with st.spinner(f"Fetching data for {artist_input}... this takes about 15 seconds."):
             try:
                 results, cities, error_msg = asyncio.run(perform_search(artist_input))
                 
-                # --- NEW DIAGNOSTIC UI ---
-                # Always show the screenshot if it exists so we can see what happened!
+                # --- DIAGNOSTIC CAMERA ---
                 if os.path.exists("debug_screenshot.png"):
-                    st.warning("📷 **Bot Vision:** Here is exactly what the bot saw on the webpage.")
+                    st.warning("📷 **Bot Vision:** The bot failed to scrape the cities. Here is the last thing it saw before failing:")
                     st.image("debug_screenshot.png", width=800)
 
                 if error_msg:
