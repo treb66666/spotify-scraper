@@ -11,7 +11,7 @@ os.system("playwright install chromium")
 
 # --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
-    # FIXED FOR REAL: This is the ACTUAL live Spotify website, not the frozen Google Cache!
+    # THE ACTUAL FIX: This is the real, live Spotify URL!
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
@@ -24,7 +24,7 @@ async def get_spotify_streams_playwright(artist_id):
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)
             
-            # Click the live cookie banner so it doesn't block our clicks
+            # Dismiss cookie banners
             try:
                 cookie_btn = page.locator('button:has-text("Accept Cookies"), button:has-text("Accept")')
                 if await cookie_btn.count() > 0:
@@ -40,12 +40,12 @@ async def get_spotify_streams_playwright(artist_id):
             try:
                 button = page.locator('button:has-text("See more")')
                 if await button.count() > 0:
-                    await button.first.click()
+                    await button.first.click(force=True)
                     await page.wait_for_timeout(1000)
                 else:
                     button2 = page.locator('button:has-text("Show more")')
                     if await button2.count() > 0:
-                        await button2.first.click()
+                        await button2.first.click(force=True)
                         await page.wait_for_timeout(1000)
             except Exception:
                 pass 
@@ -78,8 +78,9 @@ async def get_spotify_streams_playwright(artist_id):
                 # Find the "About" section and click it to open the modal pop-up
                 about_section = page.locator('section[data-testid="about"], h2:has-text("About")')
                 if await about_section.count() > 0:
-                    await about_section.first.click()
-                    await page.wait_for_timeout(2500) # Wait for the pop-up to load
+                    # force=True ensures it clicks even if a login banner is in the way
+                    await about_section.first.click(force=True)
+                    await page.wait_for_timeout(2500) 
 
                 # Look for the text specifically in the pop-up dialog
                 dialog = page.locator('[role="dialog"]')
@@ -132,7 +133,6 @@ async def perform_search(artist_input):
     auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     sp = spotipy.Spotify(auth_manager=auth_manager)
 
-    # Cleanly extract ID whether they paste a link, URI, or just type a name
     if "http" in artist_input or "spotify:artist:" in artist_input:
         artist_id = artist_input.split("artist/")[1].split("?")[0] if "artist/" in artist_input else artist_input.split(":")[-1]
         artist_data = sp.artist(artist_id)
@@ -189,7 +189,6 @@ if st.button("Fetch Artist Data", type="primary"):
                     with col1:
                         st.subheader("🎵 Top 10 Popular Tracks")
                         df = pd.DataFrame(results)
-                        # Fixed the deprecation warning for container width
                         st.dataframe(df, width=1500, hide_index=True)
                         
                         csv = df.to_csv(index=False).encode('utf-8')
