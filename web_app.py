@@ -7,11 +7,11 @@ import pandas as pd
 import os
 import json
 
-# Installs the browser for the cloud server
 os.system("playwright install chromium")
 
+# --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
-    # THE ABSOLUTE FIX: Pointing to the REAL Spotify website.
+    # THE ACTUAL FIX: Pointing to the REAL Spotify website.
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
@@ -26,7 +26,7 @@ async def get_spotify_streams_playwright(artist_id):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        # Load your cookies if you uploaded them
+        # --- LOAD COOKIES ---
         try:
             if os.path.exists("cookies.json"):
                 with open("cookies.json", "r") as f:
@@ -39,24 +39,25 @@ async def get_spotify_streams_playwright(artist_id):
         page = await context.new_page()
         
         try:
-            # Wait for the network to finish loading completely
-            await page.goto(url, wait_until="networkidle", timeout=20000)
+            # Go to the REAL site
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
             
-            # Destroy popups blocking the screen
-            await page.evaluate("""
-                document.querySelectorAll('[data-testid="login-button"], [id^="onetrust"], .GenericModal, [role="dialog"]').forEach(el => el.remove());
-            """)
-            await page.wait_for_timeout(1000)
-            
-            # --- 1. SCRAPE TRACKS ---
+            # Dismiss cookie banners
             try:
-                # Expand the tracks list if the button exists
-                await page.evaluate("""
-                    const btns = Array.from(document.querySelectorAll('button'));
-                    const moreBtn = btns.find(b => b.innerText.includes('See more') || b.innerText.includes('Show more'));
-                    if(moreBtn) moreBtn.click();
-                """)
-                await page.wait_for_timeout(1500)
+                cookie_btn = page.locator('button:has-text("Accept Cookies"), button:has-text("Accept")')
+                if await cookie_btn.count() > 0:
+                    await cookie_btn.first.click(timeout=3000)
+            except:
+                pass
+                
+            await page.wait_for_timeout(2000)
+            
+            # --- 1. SCRAPE THE TRACKS ---
+            try:
+                more_btn = page.locator('button:has-text("See more"), button:has-text("Show more")')
+                if await more_btn.count() > 0:
+                    await more_btn.first.click(force=True)
+                    await page.wait_for_timeout(1500)
                 
                 rows = await page.query_selector_all('[data-testid="tracklist-row"]')
                 for row in rows[:10]:
@@ -80,27 +81,21 @@ async def get_spotify_streams_playwright(artist_id):
                 
             # --- 2. SCRAPE LOCATIONS ---
             try:
-                # Aggressively scroll down the page to force the "Where people listen" section to render
+                # Scroll aggressively down to force the live page to load the bottom elements
                 for _ in range(6):
-                    await page.mouse.wheel(0, 1000)
-                    await page.wait_for_timeout(800)
+                    await page.mouse.wheel(0, 800)
+                    await page.wait_for_timeout(600)
 
-                # Try to click the "About" section if the data isn't on the main screen
-                await page.evaluate("""
-                    const aboutSection = document.querySelector('section[data-testid="about"]');
-                    if (aboutSection) { aboutSection.click(); }
-                    else {
-                        const headers = Array.from(document.querySelectorAll('h2, h3, div'));
-                        const aboutHeader = headers.find(el => el.innerText === 'About');
-                        if (aboutHeader) aboutHeader.click();
-                    }
-                """)
-                await page.wait_for_timeout(2500) 
+                # Try to click the "About" section to open the pop-up
+                about_section = page.locator('section[data-testid="about"], h2:has-text("About")')
+                if await about_section.count() > 0:
+                    await about_section.last.click(force=True)
+                    await page.wait_for_timeout(2500) 
 
-                # Grab all text on the screen (including the pop-up modal)
-                dialog = await page.query_selector('[role="dialog"]')
-                if dialog:
-                    body_text = await dialog.inner_text()
+                # Get text from the dialog if it opened, otherwise check the whole page
+                dialog = page.locator('[role="dialog"]')
+                if await dialog.count() > 0:
+                    body_text = await dialog.first.inner_text()
                 else:
                     body_text = await page.inner_text('body')
 
@@ -120,8 +115,14 @@ async def get_spotify_streams_playwright(artist_id):
                                     
                         if len(cities_data) == 5:
                             break
+                            
+                # If it STILL fails to find cities, take a screenshot of what the bot is seeing!
+                if not cities_data:
+                    await page.screenshot(path="debug_screenshot.png")
+                    
             except Exception:
-                pass 
+                if not cities_data:
+                    await page.screenshot(path="debug_screenshot.png")
 
         except Exception:
             pass 
@@ -149,8 +150,8 @@ async def perform_search(artist_input):
     auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     sp = spotipy.Spotify(auth_manager=auth_manager)
 
-    # Fixed to recognize real Spotify links properly
-    if "open.spotify.com" in artist_input or "spotify:artist:" in artist_input:
+    # Fixed to recognize REAL Spotify links properly
+    if "open.spotify.com/artist/" in artist_input or "spotify:artist:" in artist_input:
         artist_id = artist_input.split("artist/")[1].split("?")[0] if "artist/" in artist_input else artist_input.split(":")[-1]
         artist_data = sp.artist(artist_id)
         artist_name = artist_data['name']
@@ -162,6 +163,10 @@ async def perform_search(artist_input):
         artist_data = items[0]
         artist_name = artist_data['name']
         artist_id = artist_data['id']
+
+    # Delete old debug screenshot if it exists from a previous run
+    if os.path.exists("debug_screenshot.png"):
+        os.remove("debug_screenshot.png")
 
     top_tracks_data, cities_data = await get_spotify_streams_playwright(artist_id)
     if not top_tracks_data:
@@ -223,6 +228,10 @@ if st.button("Fetch Artist Data", type="primary"):
                                 st.metric(label=city_info["City"], value=city_info["Listeners"])
                         else:
                             st.info("Location data not found or hidden for this artist.")
+                            # Show the debug screenshot so we can see exactly why it failed!
+                            if os.path.exists("debug_screenshot.png"):
+                                st.warning("Here is what the bot saw when it tried to find the locations:")
+                                st.image("debug_screenshot.png", use_container_width=True)
                             
             except Exception as e:
                 st.error(f"An unexpected error occurred: {e}")
