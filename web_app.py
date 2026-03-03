@@ -11,29 +11,30 @@ os.system("playwright install chromium")
 
 # --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
-    # THE ACTUAL FIX: This is the real, live Spotify URL!
+    # THE REAL FIX: Hitting the actual, live Spotify domain!
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(viewport={'width': 1920, 'height': 1080})
+        # Added Stealth arguments and a real User-Agent so Spotify doesn't block the cloud server
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
         page = await context.new_page()
         
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)
             
-            # Dismiss cookie banners
-            try:
-                cookie_btn = page.locator('button:has-text("Accept Cookies"), button:has-text("Accept")')
-                if await cookie_btn.count() > 0:
-                    await cookie_btn.first.click()
-                    await page.wait_for_timeout(1000)
-            except Exception:
-                pass
-            
-            await page.wait_for_selector('[data-testid="tracklist-row"]', timeout=10000)
+            # Destroy login walls and cookie banners from the code so they can't block our clicks
+            await page.evaluate("""
+                document.querySelectorAll('[data-testid="login-button"], [id^="onetrust"], .GenericModal').forEach(el => el.remove());
+            """)
             await page.wait_for_timeout(2000)
             
             # 1. SCRAPE THE TRACKS
@@ -70,17 +71,16 @@ async def get_spotify_streams_playwright(artist_id):
                     
             # 2. SCRAPE "WHERE PEOPLE LISTEN" (Top Locations)
             try:
-                # Scroll down so the live page dynamically loads the bottom elements
-                for i in range(1, 6):
-                    await page.evaluate(f"window.scrollTo(0, {i * 1000})")
-                    await page.wait_for_timeout(800)
+                # Scroll aggressively down to force the live page to load the bottom elements
+                for i in range(1, 8):
+                    await page.evaluate(f"window.scrollTo(0, {i * 800})")
+                    await page.wait_for_timeout(500)
 
                 # Find the "About" section and click it to open the modal pop-up
                 about_section = page.locator('section[data-testid="about"], h2:has-text("About")')
                 if await about_section.count() > 0:
-                    # force=True ensures it clicks even if a login banner is in the way
-                    await about_section.first.click(force=True)
-                    await page.wait_for_timeout(2500) 
+                    await about_section.last.click(force=True)
+                    await page.wait_for_timeout(3000) 
 
                 # Look for the text specifically in the pop-up dialog
                 dialog = page.locator('[role="dialog"]')
@@ -133,7 +133,7 @@ async def perform_search(artist_input):
     auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     sp = spotipy.Spotify(auth_manager=auth_manager)
 
-    if "http" in artist_input or "spotify:artist:" in artist_input:
+    if "spotify.com" in artist_input or "spotify:artist:" in artist_input:
         artist_id = artist_input.split("artist/")[1].split("?")[0] if "artist/" in artist_input else artist_input.split(":")[-1]
         artist_data = sp.artist(artist_id)
         artist_name = artist_data['name']
