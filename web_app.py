@@ -7,12 +7,12 @@ import pandas as pd
 import os
 
 # Tell the cloud server to install the hidden browser
+# (Removed the 'install-deps' line that was causing the background errors!)
 os.system("playwright install chromium")
-os.system("playwright install-deps chromium")
 
 # --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
-    # CHANGED: Now using the actual, live Spotify website!
+    # FIXED: Now pointing to the actual, live Spotify website!
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
@@ -72,14 +72,15 @@ async def get_spotify_streams_playwright(artist_id):
             # 2. SCRAPE "WHERE PEOPLE LISTEN" (Top Locations)
             try:
                 # Scroll down so the live page dynamically loads the bottom elements
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(2000)
+                for i in range(1, 6):
+                    await page.evaluate(f"window.scrollTo(0, {i * 1000})")
+                    await page.wait_for_timeout(800)
 
                 # Find the "About" section and click it to open the modal
-                about_section = page.locator('section[data-testid="about"]')
+                about_section = page.locator('section[data-testid="about"], h2:has-text("About")')
                 if await about_section.count() > 0:
                     await about_section.first.click()
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(2000) # Wait for the pop-up to appear
 
                 # Look for the text specifically in the pop-up dialog
                 dialog = page.locator('[role="dialog"]')
@@ -126,14 +127,15 @@ def get_release_date_from_spotify(sp, artist_name, track_name):
         return "Unknown"
 
 async def perform_search(artist_input):
+    # Hardcoded exactly as you requested!
     CLIENT_ID = "1d7660677d5b4567b86bfa2d730eacd7"
     CLIENT_SECRET = "37a4d9cd968e43ad851074944d2df8e7"
     
     auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     sp = spotipy.Spotify(auth_manager=auth_manager)
 
-    if "spotify.com/artist/" in artist_input:
-        artist_id = artist_input.split("artist/")[1].split("?")[0]
+    if "open.spotify.com/artist/" in artist_input or "spotify:artist:" in artist_input:
+        artist_id = artist_input.split("artist/")[1].split("?")[0] if "artist/" in artist_input else artist_input.split(":")[-1]
         artist_data = sp.artist(artist_id)
         artist_name = artist_data['name']
     else:
@@ -189,6 +191,15 @@ if st.button("Fetch Artist Data", type="primary"):
                         st.subheader("🎵 Top 10 Popular Tracks")
                         df = pd.DataFrame(results)
                         st.dataframe(df, use_container_width=True, hide_index=True)
+                        
+                        # Added a button to easily download the table as a CSV file
+                        csv = df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="📥 Download Data as CSV",
+                            data=csv,
+                            file_name=f"{artist_input.replace(' ', '_')}_spotify_data.csv",
+                            mime="text/csv",
+                        )
                         
                     with col2:
                         st.subheader("🌍 Where People Listen")
