@@ -12,12 +12,13 @@ os.system("playwright install-deps chromium")
 
 # --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
+    # Switched to the official Spotify URL so the interactive modal buttons work
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
     
     async with async_playwright() as p:
-        # Force a large desktop viewport so the sidebar and location data load consistently
+        # Force a large desktop viewport so the page layout is consistent
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = await context.new_page()
@@ -61,35 +62,36 @@ async def get_spotify_streams_playwright(artist_id):
                     
             # 2. SCRAPE "WHERE PEOPLE LISTEN" (Top Locations)
             try:
-                # Scroll a bit to trigger any lazy-loading elements
-                await page.evaluate("window.scrollBy(0, 800)")
-                await page.wait_for_timeout(2000)
+                # Scroll to the bottom to make the "About" section visible
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(1500)
 
-                # Try clicking "About" if the sidebar isn't naturally visible
-                try:
-                    about_btn = page.locator('button:has-text("About")')
-                    if await about_btn.count() > 0:
-                        await about_btn.first.click()
-                        await page.wait_for_timeout(1500)
-                except Exception:
-                    pass
+                # Click the "About" section to open the modal
+                about_card = page.locator('section[data-testid="about"], h2:has-text("About")')
+                if await about_card.count() > 0:
+                    await about_card.first.click()
+                    await page.wait_for_timeout(2000) # Wait for the pop-up dialog to load
 
-                body_text = await page.inner_text('body')
+                # Extract text specifically from the dialog pop-up (or fall back to body)
+                dialog = page.locator('[role="dialog"]')
+                if await dialog.count() > 0:
+                    body_text = await dialog.first.inner_text()
+                else:
+                    body_text = await page.inner_text('body')
+
+                # Parse the cities and listener numbers
                 if "Where people listen" in body_text:
                     section_text = body_text.split("Where people listen")[1]
                     lines = [line.strip() for line in section_text.split('\n') if line.strip()]
                     
                     for i, line in enumerate(lines):
-                        if "listeners" in line.lower():
+                        # Filter out 'monthly listeners' so we only grab the cities
+                        if "listeners" in line.lower() and "monthly" not in line.lower():
                             city = lines[i-1]
-                            # Sometimes Spotify lists numbers before the city name
-                            if city.isdigit() and i >= 2:
-                                city = lines[i-2]
-                                
                             listeners = line.lower().replace("listeners", "").strip()
                             
                             # Clean up and append
-                            if city and not city.isdigit() and city != "Where people listen":
+                            if city and not city.isdigit() and "Where people listen" not in city:
                                 if not any(c["City"] == city for c in cities_data):
                                     cities_data.append({"City": city, "Listeners": listeners})
                                     
@@ -155,7 +157,6 @@ async def perform_search(artist_input):
     return final_results, cities_data, None
 
 # --- STREAMLIT WEB UI ---
-# Set the page to wide so the table and cities fit side-by-side
 st.set_page_config(page_title="Spotify Stream Scraper", layout="wide") 
 
 st.title("🎧 Spotify Stream Scraper")
@@ -176,8 +177,6 @@ if st.button("Fetch Artist Data", type="primary"):
                 elif results:
                     st.success("Successfully fetched data!")
                     
-                    # --- SIDE-BY-SIDE LAYOUT CREATION ---
-                    # col1 gets 70% of the screen (table), col2 gets 30% (cities)
                     col1, col2 = st.columns([2.5, 1])
                     
                     with col1:
@@ -188,7 +187,6 @@ if st.button("Fetch Artist Data", type="primary"):
                     with col2:
                         st.subheader("🌍 Where People Listen")
                         if cities:
-                            # Display each city cleanly in a vertical list
                             for city_info in cities:
                                 st.metric(label=city_info["City"], value=city_info["Listeners"])
                         else:
