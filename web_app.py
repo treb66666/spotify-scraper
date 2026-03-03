@@ -5,13 +5,13 @@ from spotipy.oauth2 import SpotifyClientCredentials
 from playwright.async_api import async_playwright
 import pandas as pd
 import os
-import json # <-- Added to read the cookie file
+import json 
 
 os.system("playwright install chromium")
 
 # --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
-    # THE REAL LIVE SPOTIFY URL
+    # MY MASSIVE TYPO IS FINALLY FIXED: Hitting the actual, live Spotify domain!
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
@@ -31,7 +31,6 @@ async def get_spotify_streams_playwright(artist_id):
             if os.path.exists("cookies.json"):
                 with open("cookies.json", "r") as f:
                     raw_cookies = json.load(f)
-                    # Clean the cookies so Playwright accepts them perfectly
                     valid_cookies = []
                     for c in raw_cookies:
                         valid_cookies.append({
@@ -42,14 +41,14 @@ async def get_spotify_streams_playwright(artist_id):
                         })
                     await context.add_cookies(valid_cookies)
         except Exception as e:
-            pass # If cookies fail, it will just try to proceed without them
+            pass 
             
         page = await context.new_page()
         
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)
             
-            # Destroy login walls and cookie banners from the code so they can't block our clicks
+            # Destroy login walls and cookie banners
             await page.evaluate("""
                 document.querySelectorAll('[data-testid="login-button"], [id^="onetrust"], .GenericModal').forEach(el => el.remove());
             """)
