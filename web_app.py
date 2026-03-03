@@ -12,19 +12,28 @@ os.system("playwright install-deps chromium")
 
 # --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
-    # Switched to the official Spotify URL so the interactive modal buttons work
+    # CHANGED: Now using the actual, live Spotify website!
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
     
     async with async_playwright() as p:
-        # Force a large desktop viewport so the page layout is consistent
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = await context.new_page()
         
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            
+            # Click the live cookie banner so it doesn't block our clicks
+            try:
+                cookie_btn = page.locator('button:has-text("Accept Cookies"), button:has-text("Accept")')
+                if await cookie_btn.count() > 0:
+                    await cookie_btn.first.click()
+                    await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            
             await page.wait_for_selector('[data-testid="tracklist-row"]', timeout=10000)
             await page.wait_for_timeout(2000)
             
@@ -62,35 +71,32 @@ async def get_spotify_streams_playwright(artist_id):
                     
             # 2. SCRAPE "WHERE PEOPLE LISTEN" (Top Locations)
             try:
-                # Scroll to the bottom to make the "About" section visible
+                # Scroll down so the live page dynamically loads the bottom elements
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(2000)
 
-                # Click the "About" section to open the modal
-                about_card = page.locator('section[data-testid="about"], h2:has-text("About")')
-                if await about_card.count() > 0:
-                    await about_card.first.click()
-                    await page.wait_for_timeout(2000) # Wait for the pop-up dialog to load
+                # Find the "About" section and click it to open the modal
+                about_section = page.locator('section[data-testid="about"]')
+                if await about_section.count() > 0:
+                    await about_section.first.click()
+                    await page.wait_for_timeout(2000)
 
-                # Extract text specifically from the dialog pop-up (or fall back to body)
+                # Look for the text specifically in the pop-up dialog
                 dialog = page.locator('[role="dialog"]')
                 if await dialog.count() > 0:
                     body_text = await dialog.first.inner_text()
                 else:
                     body_text = await page.inner_text('body')
 
-                # Parse the cities and listener numbers
                 if "Where people listen" in body_text:
                     section_text = body_text.split("Where people listen")[1]
                     lines = [line.strip() for line in section_text.split('\n') if line.strip()]
                     
                     for i, line in enumerate(lines):
-                        # Filter out 'monthly listeners' so we only grab the cities
                         if "listeners" in line.lower() and "monthly" not in line.lower():
                             city = lines[i-1]
                             listeners = line.lower().replace("listeners", "").strip()
                             
-                            # Clean up and append
                             if city and not city.isdigit() and "Where people listen" not in city:
                                 if not any(c["City"] == city for c in cities_data):
                                     cities_data.append({"City": city, "Listeners": listeners})
