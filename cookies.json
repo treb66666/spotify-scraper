@@ -1,7 +1,7 @@
 [
     {
         "domain": ".spotify.com",
-        "expirationDate": 1806602865,
+        "expirationDate": 1806603709,
         "hostOnly": false,
         "httpOnly": false,
         "name": "_hp5_event_props.4043975597",
@@ -14,7 +14,7 @@
     },
     {
         "domain": ".spotify.com",
-        "expirationDate": 1806602865,
+        "expirationDate": 1806603709,
         "hostOnly": false,
         "httpOnly": false,
         "name": "_hp5_let.4043975597",
@@ -23,7 +23,7 @@
         "secure": true,
         "session": false,
         "storeId": null,
-        "value": "1772525265714"
+        "value": "1772526109872"
     },
     {
         "domain": ".spotify.com",
@@ -40,7 +40,7 @@
     },
     {
         "domain": ".spotify.com",
-        "expirationDate": 1804061265.013247,
+        "expirationDate": 1804062106.774175,
         "hostOnly": false,
         "httpOnly": false,
         "name": "sp_t",
@@ -66,7 +66,7 @@
     },
     {
         "domain": ".spotify.com",
-        "expirationDate": 1806602865,
+        "expirationDate": 1806603709,
         "hostOnly": false,
         "httpOnly": false,
         "name": "_hp5_meta.4043975597",
@@ -79,7 +79,7 @@
     },
     {
         "domain": ".spotify.com",
-        "expirationDate": 1804061265.714227,
+        "expirationDate": 1804062108.991177,
         "hostOnly": false,
         "httpOnly": false,
         "name": "sp_adid",
