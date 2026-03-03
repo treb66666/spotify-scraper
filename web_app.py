@@ -5,12 +5,13 @@ from spotipy.oauth2 import SpotifyClientCredentials
 from playwright.async_api import async_playwright
 import pandas as pd
 import os
+import json # <-- Added to read the cookie file
 
-# Tell the cloud server to install the hidden browser
 os.system("playwright install chromium")
 
 # --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
+    # THE REAL LIVE SPOTIFY URL
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
@@ -24,28 +25,42 @@ async def get_spotify_streams_playwright(artist_id):
             viewport={'width': 1920, 'height': 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
+
+        # --- EAT THE STOLEN COOKIES ---
+        try:
+            if os.path.exists("cookies.json"):
+                with open("cookies.json", "r") as f:
+                    raw_cookies = json.load(f)
+                    # Clean the cookies so Playwright accepts them perfectly
+                    valid_cookies = []
+                    for c in raw_cookies:
+                        valid_cookies.append({
+                            "name": c["name"],
+                            "value": c["value"],
+                            "domain": c["domain"],
+                            "path": c["path"]
+                        })
+                    await context.add_cookies(valid_cookies)
+        except Exception as e:
+            pass # If cookies fail, it will just try to proceed without them
+            
         page = await context.new_page()
         
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-            # Remove login walls and cookie banners
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            
+            # Destroy login walls and cookie banners from the code so they can't block our clicks
             await page.evaluate("""
                 document.querySelectorAll('[data-testid="login-button"], [id^="onetrust"], .GenericModal').forEach(el => el.remove());
             """)
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(2000)
             
             # 1. SCRAPE THE TRACKS
             try:
-                button = page.locator('button:has-text("See more")')
+                button = page.locator('button:has-text("See more"), button:has-text("Show more")')
                 if await button.count() > 0:
                     await button.first.click(force=True)
                     await page.wait_for_timeout(1000)
-                else:
-                    button2 = page.locator('button:has-text("Show more")')
-                    if await button2.count() > 0:
-                        await button2.first.click(force=True)
-                        await page.wait_for_timeout(1000)
             except Exception:
                 pass 
             
@@ -67,82 +82,46 @@ async def get_spotify_streams_playwright(artist_id):
                             break
                     tracks.append({'name': track_name, 'streams': streams_str})
                     
-            # 2. SCRAPE "WHERE PEOPLE LISTEN" — Robust multi-strategy approach
+            # 2. SCRAPE "WHERE PEOPLE LISTEN" (Top Locations)
             try:
-                # Scroll slowly to load lazy content
-                for i in range(1, 12):
-                    await page.evaluate(f"window.scrollTo(0, {i * 600})")
-                    await page.wait_for_timeout(400)
+                # Scroll aggressively down to force the live page to load the bottom elements
+                for i in range(1, 8):
+                    await page.evaluate(f"window.scrollTo(0, {i * 800})")
+                    await page.wait_for_timeout(500)
 
-                # Give dynamic content time to render
-                await page.wait_for_timeout(2000)
+                # Find the "About" section and click it to open the modal pop-up
+                about_section = page.locator('section[data-testid="about"], h2:has-text("About")')
+                if await about_section.count() > 0:
+                    await about_section.last.click(force=True)
+                    await page.wait_for_timeout(3000) 
 
-                # --- Strategy A: look for the dedicated "Where People Listen" section ---
-                # Spotify renders this as a section with city name + listener count spans
-                city_els = await page.query_selector_all('[data-testid="artist-top-cities"] li, [class*="TopCities"] li, [class*="top-cities"] li')
-                if city_els:
-                    for el in city_els[:5]:
-                        text = await el.inner_text()
-                        lines = [l.strip() for l in text.split('\n') if l.strip()]
-                        if len(lines) >= 2:
-                            cities_data.append({"City": lines[0], "Listeners": lines[1]})
+                # Look for the text specifically in the pop-up dialog
+                dialog = page.locator('[role="dialog"]')
+                if await dialog.count() > 0:
+                    body_text = await dialog.first.inner_text()
+                else:
+                    body_text = await page.inner_text('body')
 
-                # --- Strategy B: scan all text for "Where people listen" heading ---
-                if not cities_data:
-                    full_text = await page.inner_text('body')
-                    if "Where people listen" in full_text:
-                        section = full_text.split("Where people listen")[1]
-                        lines = [l.strip() for l in section.split('\n') if l.strip()]
-                        i = 0
-                        while i < len(lines) and len(cities_data) < 5:
-                            line = lines[i]
-                            # Look for a listener count line: digits + optional commas + "listeners"
-                            if "listener" in line.lower() and "monthly" not in line.lower():
-                                city_candidate = lines[i - 1] if i > 0 else ""
-                                listeners_val = line.lower().replace("listeners", "").replace(",", "").strip()
-                                if (city_candidate
-                                        and not city_candidate[0].isdigit()
-                                        and "Where people" not in city_candidate
-                                        and len(city_candidate) < 60):
-                                    if not any(c["City"] == city_candidate for c in cities_data):
-                                        cities_data.append({"City": city_candidate, "Listeners": listeners_val})
-                            i += 1
-
-                # --- Strategy C: Try clicking "About" section to open a modal ---
-                if not cities_data:
-                    about_btn = page.locator('button:has-text("About"), [data-testid="about-section-button"], section[data-testid="about"] button')
-                    if await about_btn.count() > 0:
-                        await about_btn.first.click(force=True)
-                        await page.wait_for_timeout(3000)
-
-                        dialog = page.locator('[role="dialog"]')
-                        if await dialog.count() > 0:
-                            modal_text = await dialog.first.inner_text()
-                        else:
-                            modal_text = await page.inner_text('body')
-
-                        if "Where people listen" in modal_text:
-                            section = modal_text.split("Where people listen")[1]
-                            lines = [l.strip() for l in section.split('\n') if l.strip()]
-                            i = 0
-                            while i < len(lines) and len(cities_data) < 5:
-                                line = lines[i]
-                                if "listener" in line.lower() and "monthly" not in line.lower():
-                                    city_candidate = lines[i - 1] if i > 0 else ""
-                                    listeners_val = line.lower().replace("listeners", "").replace(",", "").strip()
-                                    if (city_candidate
-                                            and not city_candidate[0].isdigit()
-                                            and "Where people" not in city_candidate
-                                            and len(city_candidate) < 60):
-                                        if not any(c["City"] == city_candidate for c in cities_data):
-                                            cities_data.append({"City": city_candidate, "Listeners": listeners_val})
-                                i += 1
-
+                if "Where people listen" in body_text:
+                    section_text = body_text.split("Where people listen")[1]
+                    lines = [line.strip() for line in section_text.split('\n') if line.strip()]
+                    
+                    for i, line in enumerate(lines):
+                        if "listeners" in line.lower() and "monthly" not in line.lower():
+                            city = lines[i-1]
+                            listeners = line.lower().replace("listeners", "").strip()
+                            
+                            if city and not city.isdigit() and "Where people listen" not in city:
+                                if not any(c["City"] == city for c in cities_data):
+                                    cities_data.append({"City": city, "Listeners": listeners})
+                                    
+                        if len(cities_data) == 5:
+                            break
             except Exception:
-                pass
+                pass 
 
         except Exception:
-            pass
+            pass 
         finally:
             await browser.close()
             
@@ -167,7 +146,7 @@ async def perform_search(artist_input):
     auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     sp = spotipy.Spotify(auth_manager=auth_manager)
 
-    if "spotify.com" in artist_input or "spotify:artist:" in artist_input:
+    if "http" in artist_input or "spotify:artist:" in artist_input:
         artist_id = artist_input.split("artist/")[1].split("?")[0] if "artist/" in artist_input else artist_input.split(":")[-1]
         artist_data = sp.artist(artist_id)
         artist_name = artist_data['name']
@@ -209,7 +188,7 @@ if st.button("Fetch Artist Data", type="primary"):
     if not artist_input:
         st.warning("Please provide an Artist Name or Spotify Link.")
     else:
-        with st.spinner(f"Fetching data for {artist_input}... this takes about 15-20 seconds."):
+        with st.spinner(f"Fetching data for {artist_input}... this takes about 10-15 seconds."):
             try:
                 results, cities, error_msg = asyncio.run(perform_search(artist_input))
                 
@@ -239,7 +218,7 @@ if st.button("Fetch Artist Data", type="primary"):
                             for city_info in cities:
                                 st.metric(label=city_info["City"], value=city_info["Listeners"])
                         else:
-                            st.info("Location data not found. Spotify may be blocking the scraper for this artist, or the section is hidden.")
+                            st.info("Location data not found or hidden for this artist.")
                             
             except Exception as e:
                 st.error(f"An unexpected error occurred: {e}")
