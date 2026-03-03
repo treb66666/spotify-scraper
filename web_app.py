@@ -2,21 +2,29 @@ import streamlit as st
 import asyncio
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
-from playwright.async_api import async_playwright
 import pandas as pd
 import os
 import json
+import subprocess
+import sys
 
-# --- NO MORE os.system("playwright install") ---
-# Streamlit will handle this via packages.txt now.
+# Install Playwright browsers at runtime (required on Streamlit Cloud)
+@st.cache_resource
+def install_playwright():
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        capture_output=True, text=True
+    )
+    return result.returncode == 0
 
 async def get_spotify_streams_playwright(artist_id):
+    from playwright.async_api import async_playwright
+
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
     
     async with async_playwright() as p:
-        # Launch using the pre-installed Chromium on the server
         browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"]
@@ -52,26 +60,25 @@ async def get_spotify_streams_playwright(artist_id):
                     tracks.append({'name': name, 'streams': streams})
 
             # --- LOCATION SCRAPING ---
-            # Scroll down to load the About section
             for _ in range(5):
                 await page.mouse.wheel(0, 1000)
                 await page.wait_for_timeout(600)
 
-            # Click the About card
             about_card = page.locator('section[data-testid="about"]')
             if await about_card.count() > 0:
                 await about_card.click(force=True)
-                await page.wait_for_timeout(3000) 
+                await page.wait_for_timeout(3000)
 
                 body_text = await page.inner_text('body')
                 if "Where people listen" in body_text:
                     lines = [l.strip() for l in body_text.split("Where people listen")[1].split('\n') if l.strip()]
                     for i, line in enumerate(lines):
-                        if "listeners" in line.lower() and not city.isdigit():
+                        if "listeners" in line.lower() and i > 0:
                             city = lines[i-1]
-                            count = line.replace("listeners", "").strip()
-                            if len(cities_data) < 5:
-                                cities_data.append({"City": city, "Listeners": count})
+                            if not city.isdigit():
+                                count = line.replace("listeners", "").strip()
+                                if len(cities_data) < 5:
+                                    cities_data.append({"City": city, "Listeners": count})
 
             if not cities_data:
                 await page.screenshot(path="debug_screenshot.png")
@@ -88,7 +95,8 @@ def get_release_date(sp, artist_name, track_name):
         res = sp.search(q=f"artist:{artist_name} track:{track_name}", type='track', limit=1)
         if res['tracks']['items']:
             return res['tracks']['items'][0]['album']['release_date']
-    except: pass
+    except:
+        pass
     return "Unknown"
 
 async def perform_search(artist_input):
@@ -116,9 +124,15 @@ async def perform_search(artist_input):
     except Exception as e:
         return None, None, str(e)
 
-# --- SIMPLE UI ---
+# --- UI ---
 st.set_page_config(page_title="Spotify Pro Scraper")
 st.title("🎧 Spotify Artist Insights")
+
+# Install Playwright Chromium on startup (cached so it only runs once)
+with st.spinner("Initializing browser engine..."):
+    installed = install_playwright()
+    if not installed:
+        st.warning("Browser installation may have had issues. Proceeding anyway...")
 
 query = st.text_input("Enter Artist Name or URL")
 
