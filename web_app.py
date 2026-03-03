@@ -7,24 +7,26 @@ import pandas as pd
 import os
 import json
 
-# Remove os.system("playwright install chromium") - handled by Streamlit Cloud now
+# NO os.system("playwright install") here anymore!
 
 async def get_spotify_streams_playwright(artist_id):
-    # Construct URL safely to avoid auto-formatting issues
-    base = "https://open.spotify.com/artist/"
-    url = f"{base}{artist_id}"
+    # Constructing the URL safely
+    url = f"https://open.spotify.com/artist/{artist_id}"
     
     tracks = []
     cities_data = []
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # We tell it where to find the Chromium we installed via packages.txt
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+        )
         context = await browser.new_context(
-            viewport={'width': 1280, 'height': 800},
+            viewport={'width': 1280, 'height': 1000},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
 
-        # Load Cookies
         if os.path.exists("cookies.json"):
             with open("cookies.json", "r") as f:
                 cookies = json.load(f)
@@ -33,62 +35,59 @@ async def get_spotify_streams_playwright(artist_id):
         page = await context.new_page()
         
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(2000)
+            # Go to page and wait for things to settle
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            await page.wait_for_timeout(3000)
 
-            # 1. SCRAPE TRACKS
+            # --- SCRAPE TRACKS ---
             rows = await page.query_selector_all('[data-testid="tracklist-row"]')
             for row in rows[:10]:
-                text = await row.inner_text()
-                parts = [p.strip() for p in text.split('\n') if p.strip()]
-                if len(parts) >= 2:
-                    # Logic to find the number (streams) and the name
-                    streams = "Unknown"
-                    for p in parts:
-                        if p.replace(',', '').isdigit():
-                            streams = p
-                            break
-                    tracks.append({'name': parts[0], 'streams': streams})
+                try:
+                    text = await row.inner_text()
+                    parts = [p.strip() for p in text.split('\n') if p.strip()]
+                    if len(parts) >= 2:
+                        name = parts[0]
+                        # Look for the stream count (usually a long number string)
+                        streams = "Unknown"
+                        for p in parts:
+                            if p.replace(',', '').isdigit() and len(p) > 3:
+                                streams = p
+                                break
+                        tracks.append({'name': name, 'streams': streams})
+                except:
+                    continue
 
-            # 2. SCRAPE LOCATIONS (The "About" Section)
-            # Scroll to find the About section
-            for _ in range(5):
-                await page.mouse.wheel(0, 800)
-                await page.wait_for_timeout(500)
+            # --- SCRAPE LOCATIONS ---
+            # Scroll down to reveal the "About" card
+            for _ in range(6):
+                await page.mouse.wheel(0, 1000)
+                await page.wait_for_timeout(700)
 
-            # Click the About Card
-            about_selectors = [
-                'section[data-testid="about"]',
-                'div[role="button"]:has-text("Monthly Listeners")',
-                'button:has-text("About")'
-            ]
-            
-            clicked = False
-            for selector in about_selectors:
-                if await page.locator(selector).count() > 0:
-                    await page.click(selector, force=True, timeout=5000)
-                    clicked = True
-                    break
-            
-            if clicked:
-                await page.wait_for_timeout(3000) # Wait for modal
-                
-                # Look for city data in the popup
+            # Target the "About" section specifically
+            about_card = page.locator('section[data-testid="about"]')
+            if await about_card.count() > 0:
+                # Force click the card to open the modal
+                await about_card.click(force=True)
+                await page.wait_for_timeout(4000) # Wait for popup
+
+                # Get text from the modal
                 dialog = page.locator('[role="dialog"]')
-                body_text = await dialog.inner_text() if await dialog.count() > 0 else await page.inner_text('body')
+                if await dialog.count() > 0:
+                    body_text = await dialog.inner_text()
+                else:
+                    body_text = await page.inner_text('body')
 
                 if "Where people listen" in body_text:
-                    parts = body_text.split("Where people listen")[1].split('\n')
-                    clean_parts = [x.strip() for x in parts if x.strip() and "listeners" not in x.lower()]
-                    
-                    # Grouping City and Numbers
-                    for i in range(0, len(clean_parts)-1, 2):
-                        city = clean_parts[i]
-                        listeners = clean_parts[i+1]
-                        if not city.isdigit() and len(cities_data) < 5:
-                            cities_data.append({"City": city, "Listeners": listeners})
+                    # Logic to extract City and Listeners
+                    lines = [l.strip() for l in body_text.split('\n') if l.strip()]
+                    for i, line in enumerate(lines):
+                        if "listeners" in line.lower() and "monthly" not in line.lower():
+                            city = lines[i-1]
+                            count = line.replace("listeners", "").strip()
+                            if not city.isdigit() and len(cities_data) < 5:
+                                cities_data.append({"City": city, "Listeners": count})
 
-            # Screenshot if locations fail
+            # Screenshot if we failed to get cities
             if not cities_data:
                 await page.screenshot(path="debug_screenshot.png")
 
@@ -99,20 +98,17 @@ async def get_spotify_streams_playwright(artist_id):
             
     return tracks, cities_data
 
-# ... [Keep your existing spotipy auth and perform_search functions here] ...
-
 def get_release_date_from_spotify(sp, artist_name, track_name):
-    query = f"{artist_name} {track_name}"
     try:
-        result = sp.search(q=query, type='track', limit=1)
-        if result['tracks']['items']:
-            return result['tracks']['items'][0]['album']['release_date']
+        query = f"artist:{artist_name} track:{track_name}"
+        res = sp.search(q=query, type='track', limit=1)
+        if res['tracks']['items']:
+            return res['tracks']['items'][0]['album']['release_date']
     except:
         pass
     return "Unknown"
 
 async def perform_search(artist_input):
-    # Use your existing ID and Secret
     CLIENT_ID = "1d7660677d5b4567b86bfa2d730eacd7"
     CLIENT_SECRET = "37a4d9cd968e43ad851074944d2df8e7"
     
@@ -120,44 +116,57 @@ async def perform_search(artist_input):
     sp = spotipy.Spotify(auth_manager=auth_manager)
 
     try:
+        # Resolve Artist ID
         if "artist/" in artist_input:
             artist_id = artist_input.split("artist/")[1].split("?")[0]
         else:
             search = sp.search(q=artist_input, type='artist', limit=1)
             artist_id = search['artists']['items'][0]['id']
-            artist_input = search['artists']['items'][0]['name']
         
-        artist_name = sp.artist(artist_id)['name']
+        artist_info = sp.artist(artist_id)
+        artist_name = artist_info['name']
         
         tracks_raw, cities = await get_spotify_streams_playwright(artist_id)
         
-        final_tracks = []
+        final_results = []
         for t in tracks_raw:
-            date = get_release_date_from_spotify(sp, artist_name, t['name'])
-            final_tracks.append({"Track Name": t['name'], "Release Date": date, "Total Streams": t['streams']})
+            rel_date = get_release_date_from_spotify(sp, artist_name, t['name'])
+            final_results.append({
+                "Track Name": t['name'],
+                "Release Date": rel_date,
+                "Total Streams": t['streams']
+            })
             
-        return final_tracks, cities, None
+        return final_results, cities, None
     except Exception as e:
         return None, None, str(e)
 
-# --- UI CODE ---
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="Spotify Insights", layout="wide")
 st.title("🎧 Spotify Artist Insights")
-artist_query = st.text_input("Artist Name or Link")
 
-if st.button("Run Scraper"):
-    with st.spinner("Bypassing security and fetching data..."):
-        results, cities, error = asyncio.run(perform_search(artist_query))
-        
-        if error:
-            st.error(error)
-            if os.path.exists("debug_screenshot.png"):
-                st.image("debug_screenshot.png", caption="What the bot saw")
-        else:
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.subheader("Top Tracks")
-                st.table(pd.DataFrame(results))
-            with col2:
-                st.subheader("Top Cities")
-                for c in cities:
-                    st.write(f"**{c['City']}**: {c['Listeners']} listeners")
+artist_query = st.text_input("Enter Artist Name or Spotify URL")
+
+if st.button("Fetch Data"):
+    if not artist_query:
+        st.error("Please enter an artist.")
+    else:
+        with st.spinner("Analyzing Spotify page... (15-20 seconds)"):
+            results, cities, err = asyncio.run(perform_search(artist_query))
+            
+            if err:
+                st.error(f"Search failed: {err}")
+            else:
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    st.subheader("Top 10 Tracks")
+                    st.table(pd.DataFrame(results))
+                with col2:
+                    st.subheader("Top Cities")
+                    if cities:
+                        for c in cities:
+                            st.metric(label=c['City'], value=c['Listeners'])
+                    else:
+                        st.write("Could not find city data.")
+                        if os.path.exists("debug_screenshot.png"):
+                            st.image("debug_screenshot.png", caption="Bot's View")
