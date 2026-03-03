@@ -5,13 +5,13 @@ from spotipy.oauth2 import SpotifyClientCredentials
 from playwright.async_api import async_playwright
 import pandas as pd
 import os
-import json 
+import json
 
+# Installs the browser for the cloud server
 os.system("playwright install chromium")
 
-# --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
-    # MY MASSIVE TYPO IS FINALLY FIXED: Hitting the actual, live Spotify domain!
+    # THE ABSOLUTE FIX: Pointing to the REAL Spotify website.
     url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
@@ -26,81 +26,85 @@ async def get_spotify_streams_playwright(artist_id):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        # --- EAT THE STOLEN COOKIES ---
+        # Load your cookies if you uploaded them
         try:
             if os.path.exists("cookies.json"):
                 with open("cookies.json", "r") as f:
                     raw_cookies = json.load(f)
-                    valid_cookies = []
-                    for c in raw_cookies:
-                        valid_cookies.append({
-                            "name": c["name"],
-                            "value": c["value"],
-                            "domain": c["domain"],
-                            "path": c["path"]
-                        })
+                    valid_cookies = [{"name": c["name"], "value": c["value"], "domain": c["domain"], "path": c["path"]} for c in raw_cookies]
                     await context.add_cookies(valid_cookies)
-        except Exception as e:
+        except:
             pass 
             
         page = await context.new_page()
         
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            # Wait for the network to finish loading completely
+            await page.goto(url, wait_until="networkidle", timeout=20000)
             
-            # Destroy login walls and cookie banners
+            # Destroy popups blocking the screen
             await page.evaluate("""
-                document.querySelectorAll('[data-testid="login-button"], [id^="onetrust"], .GenericModal').forEach(el => el.remove());
+                document.querySelectorAll('[data-testid="login-button"], [id^="onetrust"], .GenericModal, [role="dialog"]').forEach(el => el.remove());
             """)
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
             
-            # 1. SCRAPE THE TRACKS
+            # --- 1. SCRAPE TRACKS ---
             try:
-                button = page.locator('button:has-text("See more"), button:has-text("Show more")')
-                if await button.count() > 0:
-                    await button.first.click(force=True)
-                    await page.wait_for_timeout(1000)
+                # Expand the tracks list if the button exists
+                await page.evaluate("""
+                    const btns = Array.from(document.querySelectorAll('button'));
+                    const moreBtn = btns.find(b => b.innerText.includes('See more') || b.innerText.includes('Show more'));
+                    if(moreBtn) moreBtn.click();
+                """)
+                await page.wait_for_timeout(1500)
+                
+                rows = await page.query_selector_all('[data-testid="tracklist-row"]')
+                for row in rows[:10]:
+                    text = await row.inner_text()
+                    parts = [p.strip() for p in text.split('\n') if p.strip()]
+                    if len(parts) >= 2:
+                        streams_str = "Unknown"
+                        track_name = "Unknown"
+                        for p in reversed(parts):
+                            if ':' in p and len(p) <= 5: continue
+                            if sum(c.isdigit() for c in p) >= 1 and not any(c.isalpha() for c in p):
+                                streams_str = p
+                                break
+                        for p in parts:
+                            if any(c.isalpha() for c in p) and p != 'E':
+                                track_name = p
+                                break
+                        tracks.append({'name': track_name, 'streams': streams_str})
             except Exception:
-                pass 
-            
-            rows = await page.query_selector_all('[data-testid="tracklist-row"]')
-            for row in rows[:10]:
-                text = await row.inner_text()
-                parts = [p.strip() for p in text.split('\n') if p.strip()]
-                if len(parts) >= 2:
-                    streams_str = "Unknown"
-                    track_name = "Unknown"
-                    for p in reversed(parts):
-                        if ':' in p and len(p) <= 5: continue
-                        if sum(c.isdigit() for c in p) >= 1 and not any(c.isalpha() for c in p):
-                            streams_str = p
-                            break
-                    for p in parts:
-                        if any(c.isalpha() for c in p) and p != 'E':
-                            track_name = p
-                            break
-                    tracks.append({'name': track_name, 'streams': streams_str})
-                    
-            # 2. SCRAPE "WHERE PEOPLE LISTEN" (Top Locations)
+                pass
+                
+            # --- 2. SCRAPE LOCATIONS ---
             try:
-                # Scroll aggressively down to force the live page to load the bottom elements
-                for i in range(1, 8):
-                    await page.evaluate(f"window.scrollTo(0, {i * 800})")
-                    await page.wait_for_timeout(500)
+                # Aggressively scroll down the page to force the "Where people listen" section to render
+                for _ in range(6):
+                    await page.mouse.wheel(0, 1000)
+                    await page.wait_for_timeout(800)
 
-                # Find the "About" section and click it to open the modal pop-up
-                about_section = page.locator('section[data-testid="about"], h2:has-text("About")')
-                if await about_section.count() > 0:
-                    await about_section.last.click(force=True)
-                    await page.wait_for_timeout(3000) 
+                # Try to click the "About" section if the data isn't on the main screen
+                await page.evaluate("""
+                    const aboutSection = document.querySelector('section[data-testid="about"]');
+                    if (aboutSection) { aboutSection.click(); }
+                    else {
+                        const headers = Array.from(document.querySelectorAll('h2, h3, div'));
+                        const aboutHeader = headers.find(el => el.innerText === 'About');
+                        if (aboutHeader) aboutHeader.click();
+                    }
+                """)
+                await page.wait_for_timeout(2500) 
 
-                # Look for the text specifically in the pop-up dialog
-                dialog = page.locator('[role="dialog"]')
-                if await dialog.count() > 0:
-                    body_text = await dialog.first.inner_text()
+                # Grab all text on the screen (including the pop-up modal)
+                dialog = await page.query_selector('[role="dialog"]')
+                if dialog:
+                    body_text = await dialog.inner_text()
                 else:
                     body_text = await page.inner_text('body')
 
+                # Parse the cities
                 if "Where people listen" in body_text:
                     section_text = body_text.split("Where people listen")[1]
                     lines = [line.strip() for line in section_text.split('\n') if line.strip()]
@@ -110,7 +114,7 @@ async def get_spotify_streams_playwright(artist_id):
                             city = lines[i-1]
                             listeners = line.lower().replace("listeners", "").strip()
                             
-                            if city and not city.isdigit() and "Where people listen" not in city:
+                            if city and not city.isdigit() and "Where people listen" not in city and "About" not in city:
                                 if not any(c["City"] == city for c in cities_data):
                                     cities_data.append({"City": city, "Listeners": listeners})
                                     
@@ -145,7 +149,8 @@ async def perform_search(artist_input):
     auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     sp = spotipy.Spotify(auth_manager=auth_manager)
 
-    if "http" in artist_input or "spotify:artist:" in artist_input:
+    # Fixed to recognize real Spotify links properly
+    if "open.spotify.com" in artist_input or "spotify:artist:" in artist_input:
         artist_id = artist_input.split("artist/")[1].split("?")[0] if "artist/" in artist_input else artist_input.split(":")[-1]
         artist_data = sp.artist(artist_id)
         artist_name = artist_data['name']
