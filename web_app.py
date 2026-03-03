@@ -10,8 +10,9 @@ import json
 os.system("playwright install chromium")
 
 async def get_spotify_streams_playwright(artist_id):
-    # THE ACTUAL SPOTIFY URL
-    url = f"https://open.spotify.com/artist/{artist_id}"
+    # Sliced up the URL so it can NEVER be corrupted by auto-formatters again
+    url = "https://" + "open.spotify.com" + "/artist/" + artist_id
+    
     tracks = []
     cities_data = []
     
@@ -25,7 +26,7 @@ async def get_spotify_streams_playwright(artist_id):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        # Load your valid cookies to bypass the login wall!
+        # --- EAT THE STOLEN COOKIES ---
         try:
             if os.path.exists("cookies.json"):
                 with open("cookies.json", "r") as f:
@@ -78,18 +79,27 @@ async def get_spotify_streams_playwright(artist_id):
                 
             # --- 2. SCRAPE LOCATIONS ---
             try:
-                # Scroll aggressively down (10 times) to guarantee the bottom half loads
-                for _ in range(10):
+                # Scroll down to ensure the About card is fully loaded
+                for _ in range(8):
                     await page.evaluate("window.scrollBy(0, 1000);")
                     await page.wait_for_timeout(800)
 
-                # Look for the About card/section and click it
-                about_section = page.locator('section[data-testid="about"], h2:text-is("About")')
-                if await about_section.count() > 0:
-                    await about_section.first.scroll_into_view_if_needed()
-                    await page.wait_for_timeout(1000)
-                    await about_section.first.click(force=True)
-                    await page.wait_for_timeout(3000) # Wait for popup to open
+                # CRITICAL FIX: Click the actual image/card inside the About section, NOT the header text!
+                await page.evaluate("""
+                    const aboutSec = document.querySelector('section[data-testid="about"]');
+                    if (aboutSec) {
+                        // Find the clickable link wrapper around the image
+                        const clickable = aboutSec.querySelector('a, div[role="button"]') || aboutSec;
+                        clickable.click();
+                    } else {
+                        // Ultimate fallback: Find the text with the listener count and click it
+                        const elements = Array.from(document.querySelectorAll('*'));
+                        const listenerText = elements.find(el => el.innerText && el.innerText.includes('monthly listeners'));
+                        if (listenerText) listenerText.click();
+                    }
+                """)
+                # Wait for the pop-up animation to finish
+                await page.wait_for_timeout(3500) 
 
                 # Read text from the modal popup
                 dialog = page.locator('[role="dialog"]')
@@ -107,7 +117,6 @@ async def get_spotify_streams_playwright(artist_id):
                         if "listeners" in line.lower() and "monthly" not in line.lower():
                             city = lines[i-1]
                             
-                            # Sometimes Spotify puts a rank number before the city name
                             if city.isdigit() and i >= 2:
                                 city = lines[i-2]
                                 
@@ -123,8 +132,7 @@ async def get_spotify_streams_playwright(artist_id):
             except Exception:
                 pass 
                 
-            # Take the diagnostic screenshot at the VERY END, so if it fails, 
-            # we see exactly where it gave up (e.g. at the bottom of the page)
+            # If it still failed, take the screenshot so we can see if the pop-up refused to open
             if not cities_data:
                 await page.screenshot(path="debug_screenshot.png")
 
@@ -154,8 +162,8 @@ async def perform_search(artist_input):
     auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     sp = spotipy.Spotify(auth_manager=auth_manager)
 
-    # Correct URL parsing for the official link format
-    if "open.spotify.com/artist/" in artist_input or "spotify:artist:" in artist_input:
+    # Safely extract IDs from typed names or URLs
+    if "open.spotify.com" in artist_input or "spotify:artist:" in artist_input:
         if "artist/" in artist_input:
             artist_id = artist_input.split("artist/")[1].split("?")[0]
         else:
@@ -176,70 +184,4 @@ async def perform_search(artist_input):
         os.remove("debug_screenshot.png")
 
     top_tracks_data, cities_data = await get_spotify_streams_playwright(artist_id)
-    if not top_tracks_data:
-        return None, None, "Failed to pull track data from the Spotify web page."
-
-    final_results = []
-    for idx, track_info in enumerate(top_tracks_data, start=1):
-        track_name = track_info['name']
-        rel_date = get_release_date_from_spotify(sp, artist_name, track_name)
-        final_results.append({
-            "Rank": idx,
-            "Track Name": track_name,
-            "Release Date": rel_date,
-            "Total Streams": track_info['streams']
-        })
-
-    return final_results, cities_data, None
-
-# --- STREAMLIT WEB UI ---
-st.set_page_config(page_title="Spotify Stream Scraper", layout="wide") 
-
-st.title("🎧 Spotify Stream Scraper")
-st.write("Enter an artist's name or paste their Spotify link below to fetch their top tracks and locations.")
-
-artist_input = st.text_input("Artist Name or Link:")
-
-if st.button("Fetch Artist Data", type="primary"):
-    if not artist_input:
-        st.warning("Please provide an Artist Name or Spotify Link.")
-    else:
-        with st.spinner(f"Fetching data for {artist_input}... this takes about 15 seconds."):
-            try:
-                results, cities, error_msg = asyncio.run(perform_search(artist_input))
-                
-                # --- DIAGNOSTIC CAMERA ---
-                if os.path.exists("debug_screenshot.png"):
-                    st.warning("📷 **Bot Vision:** The bot failed to scrape the cities. Here is the last thing it saw before failing:")
-                    st.image("debug_screenshot.png", width=800)
-
-                if error_msg:
-                    st.error(error_msg)
-                elif results:
-                    st.success("Successfully fetched data!")
-                    
-                    col1, col2 = st.columns([2.5, 1])
-                    
-                    with col1:
-                        st.subheader("🎵 Top 10 Popular Tracks")
-                        df = pd.DataFrame(results)
-                        st.dataframe(df, width=1500, hide_index=True)
-                        
-                        csv = df.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label="📥 Download Data as CSV",
-                            data=csv,
-                            file_name=f"{artist_input.replace(' ', '_')}_spotify_data.csv",
-                            mime="text/csv",
-                        )
-                        
-                    with col2:
-                        st.subheader("🌍 Where People Listen")
-                        if cities:
-                            for city_info in cities:
-                                st.metric(label=city_info["City"], value=city_info["Listeners"])
-                        else:
-                            st.info("Location data not found or hidden for this artist.")
-                            
-            except Exception as e:
-                st.error(f"An unexpected error occurred: {e}")
+    if not top_tracks
