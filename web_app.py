@@ -12,7 +12,7 @@ os.system("playwright install chromium")
 # --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
     # THE ACTUAL FIX: Pointing to the REAL Spotify website.
-    url = "https://open.spotify.com/artist/{artist_id}"
+    url = f"https://open.spotify.com/artist/{artist_id}"
     tracks = []
     cities_data = []
     
@@ -235,4 +235,3 @@ if st.button("Fetch Artist Data", type="primary"):
                             
             except Exception as e:
                 st.error(f"An unexpected error occurred: {e}")
-
