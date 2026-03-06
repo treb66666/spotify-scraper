@@ -7,9 +7,13 @@ from playwright.async_api import async_playwright
 import pandas as pd
 import os
 
-# Tell the cloud server to install the hidden browser
-os.system("playwright install chromium")
-os.system("playwright install-deps chromium")
+# --- INITIALIZATION ---
+@st.cache_resource
+def install_playwright():
+    """Ensures Playwright browser binaries are installed only once per deployment."""
+    os.system("playwright install chromium")
+
+install_playwright()
 
 # --- CORE LOGIC ---
 async def get_spotify_streams_playwright(artist_id):
@@ -68,17 +72,14 @@ async def get_spotify_streams_playwright(artist_id):
 
 def get_release_date_from_spotify(sp, artist_name, track_name):
     """Uses the official Spotify API to find the exact release date."""
-    # Clean up the track name to ensure a better search match
     clean_track_name = track_name.split('(')[0].split('-')[0].strip()
     query = f"{artist_name} {clean_track_name}"
     
     try:
-        # Search Spotify for the specific track
         result = sp.search(q=query, type='track', limit=1)
         tracks = result.get('tracks', {}).get('items', [])
         
         if tracks:
-            # Extract the release date from the album the track belongs to
             release_date = tracks[0]['album']['release_date']
             return release_date
         return "Unknown"
@@ -86,8 +87,9 @@ def get_release_date_from_spotify(sp, artist_name, track_name):
         return "Unknown"
 
 async def perform_search(artist_input):
-    CLIENT_ID = "1d7660677d5b4567b86bfa2d730eacd7"
-    CLIENT_SECRET = "37a4d9cd968e43ad851074944d2df8e7"
+    # Safely load credentials from Streamlit Secrets
+    CLIENT_ID = st.secrets["SPOTIPY_CLIENT_ID"]
+    CLIENT_SECRET = st.secrets["SPOTIPY_CLIENT_SECRET"]
     
     auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
     sp = spotipy.Spotify(auth_manager=auth_manager)
@@ -113,7 +115,6 @@ async def perform_search(artist_input):
     for idx, track_info in enumerate(top_tracks_data, start=1):
         track_name = track_info['name']
         
-        # Now we pass our authenticated Spotify connection (sp) to get the date natively
         rel_date = get_release_date_from_spotify(sp, artist_name, track_name)
         
         final_results.append({
@@ -139,14 +140,12 @@ if st.button("Fetch Tracks", type="primary"):
     else:
         with st.spinner(f"Fetching data for {artist_input}... this takes about 10 seconds."):
             try:
-                # Run the async scraping function
                 results, error_msg = asyncio.run(perform_search(artist_input))
                 
                 if error_msg:
                     st.error(error_msg)
                 elif results:
                     st.success("Successfully fetched tracks!")
-                    # Convert results to a Pandas DataFrame to render a clean web table
                     df = pd.DataFrame(results)
                     st.dataframe(df, use_container_width=True, hide_index=True)
             except Exception as e:
