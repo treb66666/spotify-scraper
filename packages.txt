@@ -15,3 +15,5 @@ libasound2
 libpangocairo-1.0-0
 libxshmfence1
 libglu1-mesa
+libxkbcommon0
+libxkbcommon-x11-0
